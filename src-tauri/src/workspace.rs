@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::ffi::OsStr;
 use std::fs;
 use std::iter::once;
@@ -612,8 +613,17 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
                 if let Ok(o) = run_diskpart_script(&path) {
                     log_command("diskpart detach cleanup", &o, Some(&path));
                 }
-                // delete file
-                // let _ = fs::remove_file(&node.path);
+                match fs::remove_file(&node.path) {
+                    Ok(_) => {}
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => {
+                        self.rescan_after_failure("delete_subtree");
+                        return Err(AppError::Message(format!(
+                            "failed to delete vhdx {}: {}",
+                            node.path, err
+                        )));
+                    }
+                }
             }
         }
         db.delete_ops_for_nodes(&order)?;
