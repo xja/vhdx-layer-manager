@@ -8,31 +8,37 @@ use crate::sys::{run_elevated_powershell, run_powershell};
 const GPT_BASIC_DATA_PARTITION: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct VhdLayout {
+    #[serde(rename = "Path")]
     pub path: String,
+    #[serde(rename = "Attached")]
     pub attached: bool,
+    #[serde(rename = "Partitions")]
     pub partitions: Vec<VhdPartition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct VhdPartition {
+    #[serde(rename = "PartitionNumber")]
     pub partition_number: u32,
     /// PowerShell Storage emits this as `Type` (partition type name).
     #[serde(rename = "Type")]
     pub kind: String,
+    #[serde(rename = "GptType")]
     pub gpt_type: Option<String>,
     #[serde(rename = "SizeMB", alias = "SizeMb")]
     pub size_mb: u64,
+    #[serde(rename = "DriveLetter")]
     pub drive_letter: Option<String>,
+    #[serde(rename = "FileSystem")]
     pub file_system: Option<String>,
+    #[serde(rename = "Label")]
     pub label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
 struct VhdAttachmentState {
+    #[serde(rename = "Attached")]
     attached: bool,
 }
 
@@ -64,7 +70,6 @@ try {{
         [pscustomobject]@{{
             PartitionNumber = [int]$p.PartitionNumber
             Type = [string]$p.Type
-            Kind = [string]$p.Type
             GptType = if ($p.GptType) {{ [string]$p.GptType }} else {{ $null }}
             SizeMB = [UInt64][math]::Round($p.Size / 1MB)
             DriveLetter = if ($p.DriveLetter) {{ [string]$p.DriveLetter }} else {{ $null }}
