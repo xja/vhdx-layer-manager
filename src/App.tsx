@@ -81,34 +81,30 @@ function App() {
             result = nodes as T;
           } else if (cmd === "attach_vhd" || cmd === "detach_vhd") {
             const id = String(args?.nodeId || "");
-            let updated: Node | null = null;
             setNodes((prev) =>
               prev.map((n) => {
                 if (n.id !== id) return n;
-                updated = {
+                return {
                   ...n,
                   status: cmd === "attach_vhd" ? "mounted" : n.bcd_guid ? "normal" : "missing_bcd",
                 };
-                return updated!;
               }),
             );
-            result = (updated || ({ id } as Node)) as T;
+            result = { id } as T;
           } else if (cmd === "add_bcd_entry") {
             const id = String(args?.nodeId || "");
-            let updated: Node | null = null;
             setNodes((prev) =>
               prev.map((n) => {
                 if (n.id !== id) return n;
-                updated = {
+                return {
                   ...n,
                   bcd_guid: n.bcd_guid || `{preview-${n.id}}`,
                   boot_files_ready: true,
                   status: n.status === "mounted" ? "mounted" : "normal",
                 };
-                return updated!;
               }),
             );
-            result = { guid: updated?.bcd_guid || "{preview}" } as T;
+            result = `{preview-${id}}` as T;
           } else if (cmd === "delete_bcd") {
             const id = String(args?.nodeId || "");
             setNodes((prev) =>
@@ -359,7 +355,7 @@ function App() {
 
 
   const isDriveRootPath = useCallback((value: string) => {
-    let normalized = value.trim().replaceAll("/", "\\");
+    let normalized = value.trim().replace(/\//g, "\\");
     if (normalized.startsWith("\\\\?\\")) {
       normalized = normalized.slice(4);
     }
