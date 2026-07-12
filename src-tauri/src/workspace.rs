@@ -79,7 +79,13 @@ impl WorkspaceService {
             let path_str = path.to_string_lossy().to_string();
             let normalized = normalize_path(&path_str);
             let created_at = file_time_or_now(&path);
-            let attached = is_vhd_attached(&path).unwrap_or(false);
+            let (attached, attach_ok) = match is_vhd_attached(&path) {
+                Ok(attached) => (attached, true),
+                Err(err) => {
+                    info!("is_vhd_attached failed path={} err={err}", path_str);
+                    (false, false)
+                }
+            };
 
             let mut parent_normalized = None;
             let mut detail_ok = true;
@@ -110,6 +116,7 @@ impl WorkspaceService {
                 created_at,
                 bcd_guid,
                 attached,
+                attach_ok,
             });
         }
 
@@ -179,12 +186,17 @@ impl WorkspaceService {
         }
 
         let latest_nodes = db.fetch_nodes()?;
-        let detail_lookup: HashMap<String, (Option<String>, bool, bool)> = scanned
+        let detail_lookup: HashMap<String, (Option<String>, bool, bool, bool)> = scanned
             .into_iter()
             .map(|info| {
                 (
                     info.normalized,
-                    (info.parent_normalized, info.detail_ok, info.attached),
+                    (
+                        info.parent_normalized,
+                        info.detail_ok,
+                        info.attached,
+                        info.attach_ok,
+                    ),
                 )
             })
             .collect();
@@ -198,8 +210,10 @@ impl WorkspaceService {
             let mut status = NodeStatus::Normal;
             if !Path::new(&n.path).exists() {
                 status = NodeStatus::MissingFile;
-            } else if let Some((parent_path, detail_ok, attached)) = detail_lookup.get(&normalized) {
-                if !detail_ok {
+            } else if let Some((parent_path, detail_ok, attached, attach_ok)) =
+                detail_lookup.get(&normalized)
+            {
+                if !detail_ok || !attach_ok {
                     status = NodeStatus::Error;
                 } else if *attached {
                     status = NodeStatus::Mounted;
@@ -346,11 +360,15 @@ impl WorkspaceService {
         let parent = db
             .fetch_node(parent_id)?
             .ok_or_else(|| AppError::Message("parent not found".into()))?;
-        if is_vhd_attached(Path::new(&parent.path)).unwrap_or(false) {
-            return Err(AppError::Message(
-                "selected parent vhdx must be detached before creating a differencing disk"
-                    .into(),
-            ));
+        match is_vhd_attached(Path::new(&parent.path)) {
+            Ok(true) => {
+                return Err(AppError::Message(
+                    "selected parent vhdx must be detached before creating a differencing disk"
+                        .into(),
+                ))
+            }
+            Ok(false) => {}
+            Err(err) => return Err(err),
         }
         self.ensure_no_attached_descendants(parent_id)?;
         let paths = self.paths()?;
@@ -684,7 +702,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         let sys_letter = pick_free_letter().ok_or_else(|| {
             AppError::Message("no free drive letter available between S: and Z:".into())
         })?;
-        let was_attached = is_vhd_attached(Path::new(&node.path)).unwrap_or(false);
+        let was_attached = is_vhd_attached(Path::new(&node.path))?;
 
         if !was_attached {
             let attach_script = attach_list_vdisk_script(Path::new(&node.path));
@@ -778,7 +796,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         let node = db
             .fetch_node(node_id)?
             .ok_or_else(|| AppError::Message("node not found".into()))?;
-        if is_vhd_attached(Path::new(&node.path)).unwrap_or(false) {
+        if is_vhd_attached(Path::new(&node.path))? {
             return db
                 .fetch_node(node_id)?
                 .ok_or_else(|| AppError::Message("node not found".into()));
@@ -819,7 +837,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
             .fetch_node(node_id)?
             .ok_or_else(|| AppError::Message("node not found".into()))?;
         self.ensure_no_attached_descendants(node_id)?;
-        if !is_vhd_attached(Path::new(&node.path)).unwrap_or(false) {
+        if !is_vhd_attached(Path::new(&node.path))? {
             return db
                 .fetch_node(node_id)?
                 .ok_or_else(|| AppError::Message("node not found".into()));
@@ -884,6 +902,7 @@ struct ScannedVhd {
     created_at: DateTime<Utc>,
     bcd_guid: Option<String>,
     attached: bool,
+    attach_ok: bool,
 }
 
 fn attached_descendants(nodes: &[Node], root_id: &str) -> Vec<Node> {
