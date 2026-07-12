@@ -57,7 +57,8 @@ impl WorkspaceService {
             .map(|n| (normalize_path(&n.path), n.clone()))
             .collect();
 
-        let vhd_paths = collect_vhdx_files(paths.root())?;
+        let disks_dir = paths.base_dir();
+        let vhd_paths = collect_vhdx_files(&disks_dir)?;
         reconcile_scanned_paths(paths.root(), &db, &mut existing_paths, &vhd_paths)?;
 
         let needs_bcd_lookup = vhd_paths.iter().any(|path| {
@@ -832,14 +833,41 @@ fn attached_descendants(nodes: &[Node], root_id: &str) -> Vec<Node> {
     found
 }
 
-fn collect_vhdx_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut stack = vec![root.to_path_buf()];
+fn collect_vhdx_files(scan_root: &Path) -> Result<Vec<PathBuf>> {
+    if !scan_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut stack = vec![scan_root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                info!(
+                    "skip unreadable dir during vhdx scan path={} err={err}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    info!(
+                        "skip unreadable dir entry during vhdx scan path={} err={err}",
+                        dir.display()
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
             if path.is_dir() {
+                if should_skip_scan_dir(&path) {
+                    info!("skip system dir during vhdx scan path={}", path.display());
+                    continue;
+                }
                 stack.push(path);
             } else if path
                 .extension()
@@ -852,6 +880,19 @@ fn collect_vhdx_files(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn should_skip_scan_dir(path: &Path) -> bool {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) => {
+            let lower = name.to_ascii_lowercase();
+            lower == "system volume information"
+                || lower == "$recycle.bin"
+                || lower == "recovery"
+                || lower == "windows"
+        }
+        None => false,
+    }
 }
 
 fn normalize_path(path: &str) -> String {

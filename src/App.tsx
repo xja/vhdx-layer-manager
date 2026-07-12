@@ -185,13 +185,38 @@ function App() {
     }
   }, [runCommand, t, wimPath]);
 
+
+  const isDriveRootPath = useCallback((value: string) => {
+    let normalized = value.trim().replaceAll("/", "\\");
+    if (normalized.startsWith("\\\\?\\")) {
+      normalized = normalized.slice(4);
+    }
+    normalized = normalized.replace(/[\\/]+$/, "");
+    return /^[A-Za-z]:$/.test(normalized);
+  }, []);
+
+  const validateRootPath = useCallback(
+    (value: string) => {
+      const targetPath = value.trim();
+      if (!targetPath) {
+        return t("error-empty-root");
+      }
+      if (isDriveRootPath(targetPath)) {
+        return t("error-drive-root");
+      }
+      return null;
+    },
+    [isDriveRootPath, t],
+  );
+
   const handleOpenExisting = useCallback(
     async (pathOverride?: unknown) => {
       const rawPath = typeof pathOverride === "string" ? pathOverride : rootPath;
       const targetPath = (rawPath || "").trim();
       setRootPath(targetPath);
-      if (!targetPath) {
-        setMessage(t("status-error", { msg: t("error-empty-root") }));
+      const validationError = validateRootPath(targetPath);
+      if (validationError) {
+        setMessage(t("status-error", { msg: validationError }));
         setStatus("error");
         return;
       }
@@ -210,14 +235,15 @@ function App() {
         await refreshRecents();
       }
     },
-    [rootPath, runCommand, i18n.language, t, syncNodes, refreshRecents],
+    [rootPath, runCommand, i18n.language, t, syncNodes, refreshRecents, validateRootPath],
   );
 
   const handleCreateWorkspace = useCallback(async () => {
     const targetPath = rootPath.trim();
     setRootPath(targetPath);
-    if (!targetPath) {
-      setMessage(t("status-error", { msg: t("error-empty-root") }));
+    const validationError = validateRootPath(targetPath);
+    if (validationError) {
+      setMessage(t("status-error", { msg: validationError }));
       setStatus("error");
       return;
     }
@@ -242,7 +268,7 @@ function App() {
     } finally {
       await refreshRecents();
     }
-  }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, syncNodes, refreshRecents]);
+  }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, syncNodes, refreshRecents, validateRootPath]);
 
   const handleCreateDiff = useCallback(async () => {
     if (!selectedNode) return;

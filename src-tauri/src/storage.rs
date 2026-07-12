@@ -19,6 +19,8 @@ pub struct VhdLayout {
 #[serde(rename_all = "PascalCase")]
 pub struct VhdPartition {
     pub partition_number: u32,
+    /// PowerShell Storage emits this as `Type` (partition type name).
+    #[serde(rename = "Type")]
     pub kind: String,
     pub gpt_type: Option<String>,
     pub size_mb: u64,
@@ -61,6 +63,7 @@ try {{
         [pscustomobject]@{{
             PartitionNumber = [int]$p.PartitionNumber
             Type = [string]$p.Type
+            Kind = [string]$p.Type
             GptType = if ($p.GptType) {{ [string]$p.GptType }} else {{ $null }}
             SizeMB = [UInt64][math]::Round($p.Size / 1MB)
             DriveLetter = if ($p.DriveLetter) {{ [string]$p.DriveLetter }} else {{ $null }}
@@ -169,6 +172,7 @@ fn ps_escape_single(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{find_system_partition_number, VhdLayout, VhdPartition};
+    use serde_json;
 
     fn sample_layout() -> VhdLayout {
         VhdLayout {
@@ -213,6 +217,39 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn deserializes_powershell_partition_type_field() {
+        let json = r#"{
+            "Path":"E:\\workspace\\disks\\0002-base.vhdx",
+            "Attached":true,
+            "Partitions":[
+                {
+                    "PartitionNumber":1,
+                    "Type":"Reserved",
+                    "GptType":"{e3c9e316-0b5c-4db8-817d-f92df00215ae}",
+                    "SizeMB":16,
+                    "DriveLetter":null,
+                    "FileSystem":null,
+                    "Label":null
+                },
+                {
+                    "PartitionNumber":4,
+                    "Type":"Basic",
+                    "GptType":"{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+                    "SizeMB":61295,
+                    "DriveLetter":"T",
+                    "FileSystem":"NTFS",
+                    "Label":"System"
+                }
+            ]
+        }"#;
+        let layout: VhdLayout = serde_json::from_str(json).expect("layout json should deserialize");
+        assert_eq!(layout.partitions.len(), 2);
+        assert_eq!(layout.partitions[0].kind, "Reserved");
+        assert_eq!(layout.partitions[1].kind, "Basic");
+        assert_eq!(find_system_partition_number(&layout), Some(4));
     }
 
     #[test]

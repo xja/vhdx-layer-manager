@@ -7,7 +7,7 @@ use crate::{
     db::{AppSettings, Database},
     error::{AppError, Result},
     logging::init_tracing,
-    paths::AppPaths,
+    paths::{validate_workspace_root, AppPaths},
 };
 
 #[derive(Clone)]
@@ -31,6 +31,7 @@ impl Default for SharedState {
 
 impl SharedState {
     pub fn initialize(&self, root: PathBuf, locale: Option<String>) -> Result<AppSettings> {
+        validate_workspace_root(&root)?;
         let paths = AppPaths::new(root);
         paths.ensure_layout()?;
         init_tracing(paths.ops_log_path().as_path())?;
@@ -53,7 +54,12 @@ impl SharedState {
 
     pub fn get_settings(&self) -> Result<Option<AppSettings>> {
         if let Some(db) = self.db_opt() {
-            Ok(Some(db.get_settings()?))
+            let settings = db.get_settings()?;
+            if let Err(err) = validate_workspace_root(std::path::Path::new(&settings.root_path)) {
+                // Reject previously saved drive-root workspaces instead of partially restoring them.
+                return Err(err);
+            }
+            Ok(Some(settings))
         } else {
             Ok(None)
         }

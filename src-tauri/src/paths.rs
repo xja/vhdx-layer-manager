@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -72,5 +72,82 @@ impl AppPaths {
             fs::create_dir_all(dir)?;
         }
         Ok(())
+    }
+}
+
+/// Reject empty paths and Windows drive roots such as `E:\`.
+pub fn validate_workspace_root(root: &Path) -> Result<()> {
+    let raw = root.to_string_lossy();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Message("workspace root path is empty".into()));
+    }
+
+    let normalized = normalize_workspace_path(trimmed);
+    if is_windows_drive_root(&normalized) {
+        return Err(AppError::Message(
+            "workspace root cannot be a drive root (for example E:\\); choose a normal folder such as E:\\test-vhdx"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn normalize_workspace_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('/', "\\");
+    if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
+        normalized = stripped.to_string();
+    }
+    while normalized.ends_with('\\') && normalized.len() > 3 {
+        // Keep drive roots like E:\ intact for detection after trailing-slash trim below.
+        normalized.pop();
+    }
+    normalized.trim_end_matches('\\').to_string()
+}
+
+fn is_windows_drive_root(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(
+        bytes,
+        [drive, b':'] if drive.is_ascii_alphabetic()
+    ) || matches!(
+        bytes,
+        [drive, b':', b'\\'] if drive.is_ascii_alphabetic()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_windows_drive_root, normalize_workspace_path, validate_workspace_root};
+    use std::path::Path;
+
+    #[test]
+    fn rejects_drive_roots() {
+        for sample in [r"E:\", r"E:/", r"e:", r"\\?\E:\", r"D:\"] {
+            assert!(
+                validate_workspace_root(Path::new(sample)).is_err(),
+                "should reject {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_normal_folders() {
+        for sample in [r"E:\test-vhdx", r"E:\backup", r"D:\Programs\vhdx-manager", r"\\?\E:\test-vhdx\"] {
+            assert!(
+                validate_workspace_root(Path::new(sample)).is_ok(),
+                "should accept {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_trailing_slashes_for_detection() {
+        assert!(is_windows_drive_root(&normalize_workspace_path(r"E:\")));
+        assert!(is_windows_drive_root(&normalize_workspace_path(r"E:/")));
+        assert!(!is_windows_drive_root(&normalize_workspace_path(
+            r"E:\test-vhdx\"
+        )));
     }
 }
