@@ -62,17 +62,24 @@ impl WorkspaceService {
         let vhd_paths = collect_vhdx_files(&disks_dir)?;
         reconcile_scanned_paths(paths.root(), &db, &mut existing_paths, &vhd_paths)?;
 
-        let needs_bcd_lookup = vhd_paths.iter().any(|path| {
-            let normalized = normalize_path(path.to_string_lossy().as_ref());
-            existing_paths
-                .get(&normalized)
-                .map(|node| node.bcd_guid.is_none())
-                .unwrap_or(true)
-        });
-        let bcd_enum = if !needs_bcd_lookup {
+        let bcd_enum = if vhd_paths.is_empty() {
             None
         } else {
-            bcdedit_enum_all().ok()
+            match bcdedit_enum_all() {
+                Ok(output) if output.exit_code.unwrap_or(-1) == 0 => Some(output),
+                Ok(output) => {
+                    log_command("bcdedit enum", &output, None);
+                    info!(
+                        "scan skipped bcd lookup because bcdedit exited with {}",
+                        output.exit_code.unwrap_or(-1)
+                    );
+                    None
+                }
+                Err(err) => {
+                    info!("scan skipped bcd lookup because bcdedit failed: {err}");
+                    None
+                }
+            }
         };
         let mut scanned = Vec::new();
 
@@ -100,14 +107,13 @@ impl WorkspaceService {
                 }
             }
 
-            let bcd_guid = existing_paths
-                .get(&normalized)
-                .and_then(|node| node.bcd_guid.clone())
-                .or_else(|| {
-                    bcd_enum
-                        .as_ref()
-                        .and_then(|out| extract_guid_for_vhd(&out.stdout, &path_str))
-                });
+            let bcd_guid = if let Some(output) = bcd_enum.as_ref() {
+                extract_guid_for_vhd(&output.stdout, &path_str)
+            } else {
+                existing_paths
+                    .get(&normalized)
+                    .and_then(|node| node.bcd_guid.clone())
+            };
 
             scanned.push(ScannedVhd {
                 path: path_str,
@@ -176,11 +182,19 @@ impl WorkspaceService {
                         existing.parent_id = target_parent.clone();
                     }
                     if let Some(guid) = info.bcd_guid.as_ref() {
-                        if existing.bcd_guid.as_deref() != Some(guid.as_str()) {
+                        if existing.bcd_guid.as_deref() != Some(guid.as_str())
+                            || !existing.boot_files_ready
+                        {
                             db.update_node_bcd(node_id, guid)?;
                             existing.bcd_guid = Some(guid.clone());
                             existing.boot_files_ready = true;
                         }
+                    } else if bcd_enum.is_some()
+                        && (existing.bcd_guid.is_some() || existing.boot_files_ready)
+                    {
+                        db.clear_node_bcd(node_id)?;
+                        existing.bcd_guid = None;
+                        existing.boot_files_ready = false;
                     }
                 }
             }
@@ -225,6 +239,8 @@ impl WorkspaceService {
                     }
                 } else if n.parent_id.is_some() {
                     status = NodeStatus::MissingParent;
+                } else if !n.boot_files_ready || n.bcd_guid.is_none() {
+                    status = NodeStatus::MissingBcd;
                 }
             }
             db.update_node_status(&n.id, status.clone())?;
@@ -314,11 +330,7 @@ impl WorkspaceService {
 
             let bcd_enum = bcdedit_enum_all()?;
             log_command("bcdedit enum", &bcd_enum, None);
-            Ok(
-                extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
-                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-                .unwrap_or_default(),
-            )
+            extract_required_guid(&bcd_enum, vhd_path.to_str().unwrap_or_default(), sys_letter)
         })() {
             Ok(guid) => guid,
             Err(err) => {
@@ -439,11 +451,7 @@ impl WorkspaceService {
             }
             let bcd_enum = bcdedit_enum_all()?;
             log_command("bcdedit enum", &bcd_enum, None);
-            Ok(
-                extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
-                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-                .unwrap_or_default(),
-            )
+            extract_required_guid(&bcd_enum, vhd_path.to_str().unwrap_or_default(), sys_letter)
         })() {
             Ok(guid) => guid,
             Err(err) => {
@@ -598,11 +606,25 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         }
         // Delete children after parents? requirement: delete subtree; we reverse to delete leaves first.
         order.reverse();
+        let mut cleanup_errors = Vec::new();
         for id in order.iter() {
             if let Some(node) = db.fetch_node(id)?.clone() {
                 if let Some(guid) = node.bcd_guid.as_ref() {
-                    if let Ok(o) = bcdedit_delete(guid) {
-                        log_command("bcdedit delete", &o, None);
+                    match bcdedit_delete(guid) {
+                        Ok(output) => {
+                            log_command("bcdedit delete", &output, None);
+                            if output.exit_code.unwrap_or(-1) != 0 {
+                                cleanup_errors.push(format!(
+                                    "bcd cleanup failed for {}: {}",
+                                    node.path,
+                                    command_error("bcdedit delete", &output, None)
+                                ));
+                            }
+                        }
+                        Err(err) => cleanup_errors.push(format!(
+                            "bcd cleanup failed for {}: {}",
+                            node.path, err
+                        )),
                     }
                 }
                 // attempt detach
@@ -610,8 +632,21 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
                 let detach_script = detach_vdisk_script(Path::new(&node.path), &[], true);
                 let path = temp.write_script("detach_cleanup.txt", &detach_script)?;
                 log_diskpart_script(&path);
-                if let Ok(o) = run_diskpart_script(&path) {
-                    log_command("diskpart detach cleanup", &o, Some(&path));
+                match run_diskpart_script(&path) {
+                    Ok(output) => {
+                        log_command("diskpart detach cleanup", &output, Some(&path));
+                        if output.exit_code.unwrap_or(-1) != 0 {
+                            cleanup_errors.push(format!(
+                                "detach cleanup failed for {}: {}",
+                                node.path,
+                                command_error("diskpart detach", &output, Some(&path))
+                            ));
+                        }
+                    }
+                    Err(err) => cleanup_errors.push(format!(
+                        "detach cleanup failed for {}: {}",
+                        node.path, err
+                    )),
                 }
                 match fs::remove_file(&node.path) {
                     Ok(_) => {}
@@ -628,15 +663,28 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         }
         db.delete_ops_for_nodes(&order)?;
         db.delete_nodes(&order)?;
+        let op_result = if cleanup_errors.is_empty() { "ok" } else { "warn" };
+        let op_detail = if cleanup_errors.is_empty() {
+            format!("node_id={}", node_id)
+        } else {
+            format!("node_id={} | {}", node_id, cleanup_errors.join(" | "))
+        };
         db.insert_op(
             &Uuid::new_v4().to_string(),
             None,
             "delete_subtree",
-            "ok",
-            &format!("node_id={}", node_id),
+            op_result,
+            &op_detail,
         )?;
         info!("delete_subtree node={node_id} count={}", order.len());
-        Ok(())
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "subtree files were deleted but cleanup reported warnings: {}",
+                cleanup_errors.join(" | ")
+            )))
+        }
     }
 
     pub fn delete_bcd(&self, node_id: &str) -> Result<()> {
@@ -767,16 +815,16 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
             }
             let bcd_enum = bcdedit_enum_all()?;
             log_command("bcdedit enum", &bcd_enum, None);
-            let guid = extract_guid_for_vhd(&bcd_enum.stdout, &node.path)
-                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter));
-            if let Some(guid) = &guid {
-                db.update_node_bcd(&node.id, guid)?;
-                if let Some(desc) = description {
-                    let res = bcdedit_set_description(guid, desc)?;
-                    log_command("bcdedit set description", &res, None);
+            let guid = extract_required_guid(&bcd_enum, &node.path, sys_letter)?;
+            db.update_node_bcd(&node.id, &guid)?;
+            if let Some(desc) = description {
+                let res = bcdedit_set_description(&guid, desc)?;
+                log_command("bcdedit set description", &res, None);
+                if res.exit_code.unwrap_or(-1) != 0 {
+                    return Err(command_error("bcdedit set description", &res, None));
                 }
             }
-            Ok(guid)
+            Ok(Some(guid))
         })() {
             Ok(guid) => guid,
             Err(err) => {
@@ -1036,6 +1084,25 @@ fn bcdedit_boot_sequence_and_reboot(guid: &str) -> Result<CommandOutput> {
     // Reboot immediately
     let _ = run_elevated_command("shutdown", &["/r", "/t", "0"], None);
     Ok(res)
+}
+
+fn extract_required_guid(
+    output: &CommandOutput,
+    vhd_path: &str,
+    sys_letter: char,
+) -> Result<String> {
+    if output.exit_code.unwrap_or(-1) != 0 {
+        return Err(command_error("bcdedit enum", output, None));
+    }
+
+    extract_guid_for_vhd(&output.stdout, vhd_path)
+        .or_else(|| extract_guid_for_partition_letter(&output.stdout, sys_letter))
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "bcd entry was created but guid could not be detected for {}",
+                vhd_path
+            ))
+        })
 }
 
 fn pick_free_letter() -> Option<char> {

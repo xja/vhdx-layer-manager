@@ -18,7 +18,7 @@ type Props = {
 function displayStatus(node: TreeNode): Exclude<TreeNode["status"], "mounted"> | TreeNode["status"] {
   // Keep mounted out of the primary status badge; mount is controlled by the toggle button.
   if (node.status === "mounted") {
-    return node.bcd_guid ? "normal" : "missing_bcd";
+    return node.bcd_guid || node.boot_files_ready ? "normal" : "missing_bcd";
   }
   return node.status;
 }

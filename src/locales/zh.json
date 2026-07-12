@@ -75,7 +75,7 @@
   "section-node-title": "节点管理",
   "node-management-tip": "使用树状视图浏览差分链，点击节点查看详情与操作。",
   "node-tree-title": "节点树",
-  "refresh-button": "刷新",
+  "refresh-button": "重载列表",
   "check-button": "检查",
   "node-detail-title": "节点详情",
   "node-detail-empty": "未选择",

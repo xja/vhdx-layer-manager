@@ -75,7 +75,7 @@
   "section-node-title": "Node management",
   "node-management-tip": "Browse the diff chain with the tree, click a node for details and actions.",
   "node-tree-title": "Node tree",
-  "refresh-button": "Refresh",
+  "refresh-button": "Reload List",
   "check-button": "Check",
   "node-detail-title": "Node detail",
   "node-detail-empty": "Not selected",

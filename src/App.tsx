@@ -437,11 +437,15 @@ function App() {
       setStatus("error");
       return;
     }
+    let workspaceOpened = false;
     try {
       await runCommand<{ settings: Settings }>("init_root", {
         rootPath: targetPath,
         locale: i18n.language,
       });
+      setStatus("initialized");
+      setWorkspaceReady(true);
+      workspaceOpened = true;
       const res = await runCommand<{ node: Node }>("create_base_vhd", {
         name: baseName,
         desc: baseDesc || null,
@@ -449,13 +453,13 @@ function App() {
         wimIndex,
         sizeGb: baseSize,
       });
-      setStatus("initialized");
-      setWorkspaceReady(true);
       setMessage(t("message-base-created", { name: res.node.name }));
-      await syncNodes();
     } catch {
       // handled in runCommand
     } finally {
+      if (workspaceOpened) {
+        await syncNodes();
+      }
       await refreshRecents();
     }
   }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, syncNodes, refreshRecents, validateRootPath]);
@@ -471,11 +475,12 @@ function App() {
           await runCommand<Node>("attach_vhd", { nodeId: node.id });
           setMessage(t("message-attached", { name: node.name }));
         }
+      } catch {
+        // handled
+      } finally {
         if (!previewMode) {
           await syncNodes();
         }
-      } catch {
-        // handled
       }
     },
     [runCommand, syncNodes, t, previewMode],
@@ -488,17 +493,18 @@ function App() {
           await runCommand("delete_bcd", { nodeId: node.id });
           setMessage(t("message-deleted-bcd"));
         } else {
-          await runCommand("add_bcd_entry", {
+          const guid = await runCommand<string | null>("add_bcd_entry", {
             nodeId: node.id,
             description: node.name,
           });
-          setMessage(t("message-repaired-bcd", { guid: node.name }));
-        }
-        if (!previewMode) {
-          await syncNodes();
+          setMessage(t("message-repaired-bcd", { guid: guid ?? t("message-no-guid") }));
         }
       } catch {
         // handled
+      } finally {
+        if (!previewMode) {
+          await syncNodes();
+        }
       }
     },
     [runCommand, syncNodes, t, previewMode],
@@ -552,9 +558,10 @@ function App() {
     try {
       await runCommand("delete_subtree", { nodeId: selectedNode });
       setMessage(t("message-deleted"));
-      await syncNodes();
     } catch {
       // handled in runCommand
+    } finally {
+      await syncNodes();
     }
   }, [selectedNode, runCommand, syncNodes, t]);
 
