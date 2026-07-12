@@ -627,26 +627,38 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
                         )),
                     }
                 }
-                // attempt detach
-                let temp = TempManager::new(self.paths()?.tmp_dir())?;
-                let detach_script = detach_vdisk_script(Path::new(&node.path), &[], true);
-                let path = temp.write_script("detach_cleanup.txt", &detach_script)?;
-                log_diskpart_script(&path);
-                match run_diskpart_script(&path) {
-                    Ok(output) => {
-                        log_command("diskpart detach cleanup", &output, Some(&path));
-                        if output.exit_code.unwrap_or(-1) != 0 {
-                            cleanup_errors.push(format!(
+                match is_vhd_attached(Path::new(&node.path)) {
+                    Ok(true) => {
+                        let temp = TempManager::new(self.paths()?.tmp_dir())?;
+                        let detach_script = detach_vdisk_script(Path::new(&node.path), &[], true);
+                        let path = temp.write_script("detach_cleanup.txt", &detach_script)?;
+                        log_diskpart_script(&path);
+                        match run_diskpart_script(&path) {
+                            Ok(output) => {
+                                log_command("diskpart detach cleanup", &output, Some(&path));
+                                if output.exit_code.unwrap_or(-1) != 0 {
+                                    cleanup_errors.push(format!(
+                                        "detach cleanup failed for {}: {}",
+                                        node.path,
+                                        command_error("diskpart detach", &output, Some(&path))
+                                    ));
+                                }
+                            }
+                            Err(err) => cleanup_errors.push(format!(
                                 "detach cleanup failed for {}: {}",
-                                node.path,
-                                command_error("diskpart detach", &output, Some(&path))
-                            ));
+                                node.path, err
+                            )),
                         }
                     }
-                    Err(err) => cleanup_errors.push(format!(
-                        "detach cleanup failed for {}: {}",
-                        node.path, err
-                    )),
+                    Ok(false) => {
+                        info!("skip detach cleanup for {} because vhd is already detached", node.path);
+                    }
+                    Err(err) => {
+                        info!(
+                            "skip detach cleanup for {} because attach-state probe failed: {}",
+                            node.path, err
+                        );
+                    }
                 }
                 match fs::remove_file(&node.path) {
                     Ok(_) => {}
