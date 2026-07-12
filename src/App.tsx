@@ -467,6 +467,7 @@ function App() {
 
   const handleToggleMount = useCallback(
     async (node: Node) => {
+      setSelectedNode(node.id);
       try {
         if (node.status === "mounted") {
           await runCommand<Node>("detach_vhd", { nodeId: node.id });
@@ -488,6 +489,7 @@ function App() {
 
   const handleToggleBoot = useCallback(
     async (node: Node) => {
+      setSelectedNode(node.id);
       try {
         if (node.bcd_guid || node.boot_files_ready) {
           await runCommand("delete_bcd", { nodeId: node.id });
