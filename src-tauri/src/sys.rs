@@ -45,6 +45,22 @@ pub fn run_command(program: &str, args: &[&str], workdir: Option<&Path>) -> Resu
     Ok(output)
 }
 
+pub fn run_powershell(script: &str, workdir: Option<&Path>) -> Result<CommandOutput> {
+    run_command(
+        "powershell.exe",
+        &[
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        workdir,
+    )
+}
+
 pub fn run_elevated_command(
     program: &str,
     args: &[&str],
@@ -58,6 +74,22 @@ pub fn run_elevated_command(
     .map_err(|err| AppError::Message(err))?;
     log_command(program, args, workdir, &output);
     Ok(output)
+}
+
+pub fn run_elevated_powershell(script: &str, workdir: Option<&Path>) -> Result<CommandOutput> {
+    run_elevated_command(
+        "powershell.exe",
+        &[
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        workdir,
+    )
 }
 
 #[elevated::elevated]

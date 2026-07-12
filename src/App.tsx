@@ -59,6 +59,17 @@ function App() {
     }
   }, [workspaceReady, runCommand]);
 
+  const syncNodes = useCallback(async () => {
+    try {
+      const list = await runCommand<Node[]>("scan_workspace");
+      setNodes(list);
+      return true;
+    } catch {
+      // errors are handled in runCommand
+      return false;
+    }
+  }, [runCommand]);
+
   const refreshRecents = useCallback(async () => {
     try {
       const list = await runCommand<RecentWorkspace[]>("list_recent_workspaces");
@@ -91,7 +102,7 @@ function App() {
           setMessage(t("status-initialized", { path: settings.root_path }));
           i18n.changeLanguage(settings.locale || "zh-CN");
           setWorkspaceReady(true);
-          await refreshNodes();
+          await syncNodes();
         } else {
           setMessage(t("status-uninitialized"));
           setWorkspaceReady(false);
@@ -192,14 +203,14 @@ function App() {
         setStatus("initialized");
         setWorkspaceReady(true);
         setMessage(t("status-initialized", { path: result.settings.root_path }));
-        await refreshNodes();
+        await syncNodes();
       } catch {
         // handled in runCommand
       } finally {
         await refreshRecents();
       }
     },
-    [rootPath, runCommand, i18n.language, t, refreshNodes, refreshRecents],
+    [rootPath, runCommand, i18n.language, t, syncNodes, refreshRecents],
   );
 
   const handleCreateWorkspace = useCallback(async () => {
@@ -225,13 +236,13 @@ function App() {
       setStatus("initialized");
       setWorkspaceReady(true);
       setMessage(t("message-base-created", { name: res.node.name }));
-      await refreshNodes();
+      await syncNodes();
     } catch {
       // handled in runCommand
     } finally {
       await refreshRecents();
     }
-  }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, refreshNodes, refreshRecents]);
+  }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, syncNodes, refreshRecents]);
 
   const handleCreateDiff = useCallback(async () => {
     if (!selectedNode) return;
@@ -242,21 +253,18 @@ function App() {
         desc: diffDesc || null,
       });
       setMessage(t("message-diff-created", { name: res.node.name }));
-      await refreshNodes();
     } catch {
       // handled in runCommand
+    } finally {
+      await syncNodes();
     }
-  }, [selectedNode, runCommand, diffName, diffDesc, t, refreshNodes]);
+  }, [selectedNode, runCommand, diffName, diffDesc, t, syncNodes]);
 
   const handleCheck = useCallback(async () => {
-    try {
-      const list = await runCommand<Node[]>("scan_workspace");
-      setNodes(list);
+    if (await syncNodes()) {
       setMessage(t("message-checked"));
-    } catch {
-      // handled in runCommand
     }
-  }, [runCommand, t]);
+  }, [syncNodes, t]);
 
   const handleBootReboot = useCallback(async () => {
     if (!selectedNode) return;
@@ -284,11 +292,11 @@ function App() {
     try {
       await runCommand("delete_subtree", { nodeId: selectedNode });
       setMessage(t("message-deleted"));
-      await refreshNodes();
+      await syncNodes();
     } catch {
       // handled in runCommand
     }
-  }, [selectedNode, runCommand, refreshNodes, t]);
+  }, [selectedNode, runCommand, syncNodes, t]);
 
   const handleAddBcd = useCallback(async () => {
     if (!selectedNode) return;
@@ -298,33 +306,34 @@ function App() {
         description: bcdName || null,
       });
       setMessage(t("message-repaired-bcd", { guid: guid ?? t("message-no-guid") }));
-      await refreshNodes();
     } catch {
       // handled in runCommand
+    } finally {
+      await syncNodes();
     }
-  }, [selectedNode, runCommand, refreshNodes, bcdName, t]);
+  }, [selectedNode, runCommand, syncNodes, bcdName, t]);
 
   const handleUpdateBcdDesc = useCallback(async () => {
     if (!selectedNode) return;
     try {
       await runCommand("update_bcd_description", { nodeId: selectedNode, description: bcdName });
       setMessage(t("message-updated-bcd"));
-      await refreshNodes();
+      await syncNodes();
     } catch {
       // handled in runCommand
     }
-  }, [selectedNode, runCommand, refreshNodes, bcdName, t]);
+  }, [selectedNode, runCommand, syncNodes, bcdName, t]);
 
   const handleDeleteBcd = useCallback(async () => {
     if (!selectedNode) return;
     try {
       await runCommand("delete_bcd", { nodeId: selectedNode });
       setMessage(t("message-deleted-bcd"));
-      await refreshNodes();
+      await syncNodes();
     } catch {
       // handled in runCommand
     }
-  }, [selectedNode, runCommand, refreshNodes, t]);
+  }, [selectedNode, runCommand, syncNodes, t]);
 
   const handleCloseWorkspace = useCallback(() => {
     setWorkspaceReady(false);

@@ -1,28 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Result;
 use crate::sys::{run_elevated_command, CommandOutput};
-
-#[derive(Debug, Clone)]
-pub struct VolumeInfo {
-    pub volume: String,
-    pub letter: Option<String>,
-    pub guid: Option<String>,
-    pub label: Option<String>,
-    pub fs: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VhdDetail {
-    pub parent: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PartitionInfo {
-    pub index: u32,
-    pub kind: String,
-    pub size_mb: Option<u64>,
-}
 
 /// Run a diskpart script stored at `script_path`.
 pub fn run_diskpart_script(script_path: &Path) -> Result<CommandOutput> {
@@ -104,7 +83,7 @@ pub fn assign_partitions_script(vhd_path: &Path, assignments: &[(u32, char)]) ->
     lines.join("\n")
 }
 
-pub fn detach_vdisk_script(vhd_path: &Path, letters: &[char]) -> String {
+pub fn detach_vdisk_script(vhd_path: &Path, letters: &[char], detach_vdisk: bool) -> String {
     let mut lines = Vec::new();
     let select_vhd = format!(r#"select vdisk file="{}""#, vhd_path.display());
     lines.push(select_vhd.clone());
@@ -112,119 +91,9 @@ pub fn detach_vdisk_script(vhd_path: &Path, letters: &[char]) -> String {
         lines.push(format!("select volume {letter}"));
         lines.push(format!("remove letter={letter} noerr"));
     }
-    lines.push(select_vhd);
-    lines.push("detach vdisk".into());
+    if detach_vdisk {
+        lines.push(select_vhd);
+        lines.push("detach vdisk".into());
+    }
     lines.join("\n")
-}
-
-/// Parse output of `detail vdisk` to extract parent path.
-pub fn parse_detail_vdisk_parent(output: &str) -> VhdDetail {
-    let mut parent = None;
-    for line in output.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.contains("parent path")
-            || lower.contains("parent:")
-            || lower.contains("parent filename")
-        {
-            if let Some(idx) = line.find(':') {
-                let rest = line[idx + 1..].trim();
-                if !rest.is_empty() {
-                    parent = Some(rest.to_string());
-                }
-            }
-        }
-    }
-    VhdDetail { parent }
-}
-
-/// Parse `list volume` output to collect volume info.
-pub fn parse_list_volume(output: &str) -> Vec<VolumeInfo> {
-    let mut volumes = Vec::new();
-    for line in output.lines() {
-        if line.trim_start().starts_with("Volume ") {
-            // Rough parsing: Volume ###  Ltr  Label  Fs ...
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let volume = parts[1].to_string();
-                let letter = parts.get(2).map(|s| s.to_string()).filter(|s| s.len() == 1);
-                volumes.push(VolumeInfo {
-                    volume,
-                    letter,
-                    guid: None,
-                    label: parts.get(3).map(|s| s.to_string()),
-                    fs: parts.get(4).map(|s| s.to_string()),
-                });
-            }
-        }
-        if line.contains("GUID:") {
-            if let Some(last) = volumes.last_mut() {
-                if let Some(idx) = line.find("GUID:") {
-                    let guid = line[idx + 5..].trim();
-                    if !guid.is_empty() {
-                        last.guid = Some(guid.to_string());
-                    }
-                }
-            }
-        }
-    }
-    volumes
-}
-
-/// Parse `detail vdisk` output to get volumes when attached.
-pub fn parse_detail_vdisk_volumes(output: &str) -> Vec<VolumeInfo> {
-    parse_list_volume(output)
-}
-
-/// Parse `list partition` output.
-pub fn parse_list_partition(output: &str) -> Vec<PartitionInfo> {
-    let mut parts = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("Partition") {
-            let cols: Vec<&str> = trimmed.split_whitespace().collect();
-            if cols.len() >= 4 {
-                let idx = cols[1].parse::<u32>().unwrap_or(0);
-                let kind = cols[2].to_string();
-                let mut size_mb = None;
-                for w in cols.iter().rev() {
-                    if let Some(val) = parse_size_mb(w) {
-                        size_mb = Some(val);
-                        break;
-                    }
-                }
-                parts.push(PartitionInfo {
-                    index: idx,
-                    kind,
-                    size_mb,
-                });
-            }
-        }
-    }
-    parts
-}
-
-fn parse_size_mb(token: &str) -> Option<u64> {
-    let lower = token.to_ascii_lowercase();
-    if lower.ends_with("mb") {
-        let num = lower.trim_end_matches("mb").trim();
-        return num.parse::<u64>().ok();
-    }
-    if lower.ends_with("gb") {
-        let num = lower.trim_end_matches("gb").trim();
-        if let Ok(val) = num.parse::<u64>() {
-            return Some(val * 1024);
-        }
-    }
-    None
-}
-
-pub fn detail_vdisk_script(vhd_path: &Path) -> String {
-    format!(
-        r#"
-select vdisk file="{vhd}"
-detail vdisk
-list volume
-"#,
-        vhd = vhd_path.display()
-    )
 }

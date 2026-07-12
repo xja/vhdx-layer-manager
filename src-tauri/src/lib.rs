@@ -9,8 +9,10 @@ mod models;
 mod paths;
 mod recents;
 mod state;
+mod storage;
 mod sys;
 mod temp;
+mod vhdx;
 mod workspace;
 
 use state::SharedState;

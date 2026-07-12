@@ -173,6 +173,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_node_path(&self, id: &str, path: &str) -> Result<()> {
+        let mut conn = self.connection();
+        conn.execute(
+            "UPDATE nodes SET path = ?1 WHERE id = ?2",
+            params![path, id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_node_bcd(&self, id: &str, bcd_guid: &str) -> Result<()> {
         let mut conn = self.connection();
         conn.execute(

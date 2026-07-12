@@ -17,16 +17,17 @@ use crate::bcd::{
 use crate::db::Database;
 use crate::diskpart::{
     assign_partitions_script, attach_list_vdisk_script, base_diskpart_script, detach_vdisk_script,
-    detail_vdisk_script, diff_attach_list_script, parse_detail_vdisk_parent, parse_list_partition,
-    run_diskpart_script,
+    diff_attach_list_script, run_diskpart_script,
 };
 use crate::dism::{apply_image, list_images};
 use crate::error::{AppError, Result};
 use crate::models::{Node, NodeStatus, WimImageInfo};
 use crate::paths::AppPaths;
 use crate::state::SharedState;
+use crate::storage::{find_system_partition_number, inspect_vhd_layout, is_vhd_attached};
 use crate::sys::{run_elevated_command, CommandOutput};
 use crate::temp::TempManager;
+use crate::vhdx::inspect_vhd_parent_path;
 use windows_sys::Win32::Storage::FileSystem::{GetLogicalDrives, QueryDosDeviceW};
 
 pub struct WorkspaceService {
@@ -58,7 +59,16 @@ impl WorkspaceService {
             .collect();
 
         let vhd_paths = collect_vhdx_files(paths.root())?;
-        let bcd_enum = if vhd_paths.is_empty() {
+        reconcile_scanned_paths(paths.root(), &db, &mut existing_paths, &vhd_paths)?;
+
+        let needs_bcd_lookup = vhd_paths.iter().any(|path| {
+            let normalized = normalize_path(path.to_string_lossy().as_ref());
+            existing_paths
+                .get(&normalized)
+                .map(|node| node.bcd_guid.is_none())
+                .unwrap_or(true)
+        });
+        let bcd_enum = if !needs_bcd_lookup {
             None
         } else {
             bcdedit_enum_all().ok()
@@ -69,22 +79,28 @@ impl WorkspaceService {
             let path_str = path.to_string_lossy().to_string();
             let normalized = normalize_path(&path_str);
             let created_at = file_time_or_now(&path);
+            let attached = is_vhd_attached(&path).unwrap_or(false);
 
             let mut parent_normalized = None;
             let mut detail_ok = true;
-            match self.detail_vdisk(&path_str) {
-                Ok(detail) => {
-                    parent_normalized = detail.parent.map(|p| normalize_path(&p));
+            match inspect_vhd_parent_path(&path) {
+                Ok(parent) => {
+                    parent_normalized = parent.map(|p| normalize_path(&p));
                 }
                 Err(err) => {
                     detail_ok = false;
-                    info!("detail_vdisk failed path={} err={err}", path_str);
+                    info!("inspect_vhd_parent_path failed path={} err={err}", path_str);
                 }
             }
 
-            let bcd_guid = bcd_enum
-                .as_ref()
-                .and_then(|out| extract_guid_for_vhd(&out.stdout, &path_str));
+            let bcd_guid = existing_paths
+                .get(&normalized)
+                .and_then(|node| node.bcd_guid.clone())
+                .or_else(|| {
+                    bcd_enum
+                        .as_ref()
+                        .and_then(|out| extract_guid_for_vhd(&out.stdout, &path_str))
+                });
 
             scanned.push(ScannedVhd {
                 path: path_str,
@@ -93,6 +109,7 @@ impl WorkspaceService {
                 detail_ok,
                 created_at,
                 bcd_guid,
+                attached,
             });
         }
 
@@ -162,9 +179,14 @@ impl WorkspaceService {
         }
 
         let latest_nodes = db.fetch_nodes()?;
-        let detail_lookup: HashMap<String, (Option<String>, bool)> = scanned
+        let detail_lookup: HashMap<String, (Option<String>, bool, bool)> = scanned
             .into_iter()
-            .map(|info| (info.normalized, (info.parent_normalized, info.detail_ok)))
+            .map(|info| {
+                (
+                    info.normalized,
+                    (info.parent_normalized, info.detail_ok, info.attached),
+                )
+            })
             .collect();
         let id_by_path: HashMap<String, String> = latest_nodes
             .iter()
@@ -176,9 +198,11 @@ impl WorkspaceService {
             let mut status = NodeStatus::Normal;
             if !Path::new(&n.path).exists() {
                 status = NodeStatus::MissingFile;
-            } else if let Some((parent_path, detail_ok)) = detail_lookup.get(&normalized) {
+            } else if let Some((parent_path, detail_ok, attached)) = detail_lookup.get(&normalized) {
                 if !detail_ok {
                     status = NodeStatus::Error;
+                } else if *attached {
+                    status = NodeStatus::Mounted;
                 } else if let Some(parent_norm) = parent_path {
                     match id_by_path.get(parent_norm) {
                         Some(pid) if n.parent_id.as_deref() == Some(pid.as_str()) => {}
@@ -235,6 +259,7 @@ impl WorkspaceService {
         log_command("diskpart create base", &create_res, Some(&script_path));
 
         if create_res.exit_code.unwrap_or(-1) != 0 {
+            self.rescan_after_failure("create_base");
             return Err(command_error(
                 "diskpart create base",
                 &create_res,
@@ -242,37 +267,48 @@ impl WorkspaceService {
             ));
         }
 
-        let dism_res = apply_image(wim_file, wim_index, &format!("{sys_letter}:\\"))?;
-        log_command("dism apply", &dism_res, None);
-        if dism_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("dism apply", &dism_res, None));
-        }
+        let guid = match (|| -> Result<String> {
+            let _attach_guard = AttachedVhdGuard::new(
+                temp.clone(),
+                vhd_path.clone(),
+                vec![sys_letter, efi_letter],
+                "detach_base.txt",
+                "diskpart detach base",
+                true,
+                true,
+            );
+            let dism_res = apply_image(wim_file, wim_index, &format!("{sys_letter}:\\"))?;
+            log_command("dism apply", &dism_res, None);
+            if dism_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error("dism apply", &dism_res, None));
+            }
 
-        let sys_mount = PathBuf::from(format!("{sys_letter}:"));
-        let efi_mount = PathBuf::from(format!("{efi_letter}:"));
-        let bcd_efi_res = run_bcdboot_to_efi(&sys_mount, &efi_mount)?;
-        log_command("bcdboot efi", &bcd_efi_res, None);
-        if bcd_efi_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("bcdboot", &bcd_efi_res, None));
-        }
+            let sys_mount = PathBuf::from(format!("{sys_letter}:"));
+            let efi_mount = PathBuf::from(format!("{efi_letter}:"));
+            let bcd_efi_res = run_bcdboot_to_efi(&sys_mount, &efi_mount)?;
+            log_command("bcdboot efi", &bcd_efi_res, None);
+            if bcd_efi_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error("bcdboot", &bcd_efi_res, None));
+            }
 
-        let bcd_res = run_bcdboot(&sys_mount)?;
-        log_command("bcdboot", &bcd_res, None);
-        if bcd_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("bcdboot", &bcd_res, None));
-        }
+            let bcd_res = run_bcdboot(&sys_mount)?;
+            log_command("bcdboot", &bcd_res, None);
+            if bcd_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error("bcdboot", &bcd_res, None));
+            }
 
-        let bcd_enum = bcdedit_enum_all()?;
-        log_command("bcdedit enum", &bcd_enum, None);
-        let guid = extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
-            .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-            .unwrap_or_default();
-
-        let detach_script = detach_vdisk_script(&vhd_path, &[sys_letter, efi_letter]);
-        let detach_path = temp.write_script("detach_base.txt", &detach_script)?;
-        log_diskpart_script(&detach_path);
-        let detach_res = run_diskpart_script(&detach_path)?;
-        log_command("diskpart detach base", &detach_res, Some(&detach_path));
+            let bcd_enum = bcdedit_enum_all()?;
+            log_command("bcdedit enum", &bcd_enum, None);
+            extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
+                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
+                .unwrap_or_default()
+        })() {
+            Ok(guid) => guid,
+            Err(err) => {
+                self.rescan_after_failure("create_base");
+                return Err(err);
+            }
+        };
 
         let node = Node {
             id: id.clone(),
@@ -303,10 +339,18 @@ impl WorkspaceService {
     }
 
     pub fn create_diff(&self, parent_id: &str, name: &str, desc: Option<String>) -> Result<Node> {
+        self.scan()?;
         let db = self.db()?;
         let parent = db
             .fetch_node(parent_id)?
             .ok_or_else(|| AppError::Message("parent not found".into()))?;
+        if is_vhd_attached(Path::new(&parent.path)).unwrap_or(false) {
+            return Err(AppError::Message(
+                "selected parent vhdx must be detached before creating a differencing disk"
+                    .into(),
+            ));
+        }
+        self.ensure_no_attached_descendants(parent_id)?;
         let paths = self.paths()?;
         paths.ensure_layout()?;
         let seq = db.next_seq()?;
@@ -330,6 +374,7 @@ impl WorkspaceService {
         let attach_res = run_diskpart_script(&attach_path)?;
         log_command("diskpart create diff", &attach_res, Some(&attach_path));
         if attach_res.exit_code.unwrap_or(-1) != 0 {
+            self.rescan_after_failure("create_diff");
             return Err(command_error(
                 "diskpart create diff",
                 &attach_res,
@@ -337,62 +382,52 @@ impl WorkspaceService {
             ));
         }
 
-        let parts = parse_list_partition(&attach_res.stdout);
-        let sys_part = parts
-            .iter()
-            .find(|p| p.kind.eq_ignore_ascii_case("Primary"))
-            .map(|p| p.index)
-            .or_else(|| {
-                parts
-                    .iter()
-                    .find(|p| p.kind.eq_ignore_ascii_case("Basic"))
-                    .map(|p| p.index)
-            });
-        let efi_part = parts
-            .iter()
-            .find(|p| p.kind.eq_ignore_ascii_case("System"))
-            .map(|p| p.index)
-            .or_else(|| parts.iter().find(|p| p.index == 2).map(|p| p.index));
+        let guid = match (|| -> Result<String> {
+            let _attach_guard = AttachedVhdGuard::new(
+                temp.clone(),
+                vhd_path.clone(),
+                vec![sys_letter],
+                "detach_diff.txt",
+                "diskpart detach diff",
+                true,
+                true,
+            );
+            let layout = inspect_vhd_layout(&vhd_path)?;
+            let sys_part = find_system_partition_number(&layout).ok_or_else(|| {
+                AppError::Message("failed to detect system partition from storage layout".into())
+            })?;
 
-        let (sys_part, efi_part) = match (sys_part, efi_part) {
-            (Some(s), Some(e)) => (s, e),
-            _ => {
-                return Err(AppError::Message(
-                    "failed to detect system/EFI partitions from list partition".into(),
-                ))
+            let assign_script = assign_partitions_script(&vhd_path, &[(sys_part, sys_letter)]);
+            let assign_path = temp.write_script("assign_diff.txt", &assign_script)?;
+            log_diskpart_script(&assign_path);
+            let assign_res = run_diskpart_script(&assign_path)?;
+            log_command("diskpart assign diff", &assign_res, Some(&assign_path));
+            if assign_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error(
+                    "diskpart assign diff",
+                    &assign_res,
+                    Some(&assign_path),
+                ));
+            }
+
+            let sys_mount = PathBuf::from(format!("{sys_letter}:"));
+            let bcd_res = run_bcdboot(&sys_mount)?;
+            log_command("bcdboot", &bcd_res, None);
+            if bcd_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error("bcdboot", &bcd_res, None));
+            }
+            let bcd_enum = bcdedit_enum_all()?;
+            log_command("bcdedit enum", &bcd_enum, None);
+            extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
+                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
+                .unwrap_or_default()
+        })() {
+            Ok(guid) => guid,
+            Err(err) => {
+                self.rescan_after_failure("create_diff");
+                return Err(err);
             }
         };
-
-        let assign_script = assign_partitions_script(&vhd_path, &[(sys_part, sys_letter)]);
-        let assign_path = temp.write_script("assign_diff.txt", &assign_script)?;
-        log_diskpart_script(&assign_path);
-        let assign_res = run_diskpart_script(&assign_path)?;
-        log_command("diskpart assign diff", &assign_res, Some(&assign_path));
-        if assign_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error(
-                "diskpart assign diff",
-                &assign_res,
-                Some(&assign_path),
-            ));
-        }
-
-        let sys_mount = PathBuf::from(format!("{sys_letter}:"));
-        let bcd_res = run_bcdboot(&sys_mount)?;
-        log_command("bcdboot", &bcd_res, None);
-        if bcd_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("bcdboot", &bcd_res, None));
-        }
-        let bcd_enum = bcdedit_enum_all()?;
-        log_command("bcdedit enum", &bcd_enum, None);
-        let guid = extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
-            .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-            .unwrap_or_default();
-
-        let detach_script = detach_vdisk_script(&vhd_path, &[sys_letter]);
-        let detach_path = temp.write_script("detach_diff.txt", &detach_script)?;
-        log_diskpart_script(&detach_path);
-        let detach_res = run_diskpart_script(&detach_path)?;
-        log_command("diskpart detach diff", &detach_res, Some(&detach_path));
 
         let node = Node {
             id: id.clone(),
@@ -518,6 +553,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
     }
 
     pub fn delete_subtree(&self, node_id: &str) -> Result<()> {
+        self.scan()?;
         let db = self.db()?;
         let nodes = db.fetch_nodes()?;
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
@@ -548,7 +584,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
                 }
                 // attempt detach
                 let temp = TempManager::new(self.paths()?.tmp_dir())?;
-                let detach_script = detach_vdisk_script(Path::new(&node.path), &[]);
+                let detach_script = detach_vdisk_script(Path::new(&node.path), &[], true);
                 let path = temp.write_script("detach_cleanup.txt", &detach_script)?;
                 log_diskpart_script(&path);
                 if let Ok(o) = run_diskpart_script(&path) {
@@ -633,82 +669,89 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
     }
 
     fn repair_bcd_inner(&self, node_id: &str, description: Option<&str>) -> Result<Option<String>> {
+        self.scan()?;
         let db = self.db()?;
         let node = db
             .fetch_node(node_id)?
             .ok_or_else(|| AppError::Message("node not found".into()))?;
+        self.ensure_no_attached_descendants(node_id)?;
         let paths = self.paths()?;
         let temp = TempManager::new(paths.tmp_dir())?;
         let sys_letter = pick_free_letter().ok_or_else(|| {
             AppError::Message("no free drive letter available between S: and Z:".into())
         })?;
+        let was_attached = is_vhd_attached(Path::new(&node.path)).unwrap_or(false);
 
-        let attach_script = crate::diskpart::attach_list_vdisk_script(Path::new(&node.path));
-        let attach_path = temp.write_script("attach_repair.txt", &attach_script)?;
-        log_diskpart_script(&attach_path);
-        let attach_res = run_diskpart_script(&attach_path)?;
-        log_command("diskpart attach repair", &attach_res, Some(&attach_path));
-        if attach_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error(
-                "diskpart attach",
-                &attach_res,
-                Some(&attach_path),
-            ));
-        }
-
-        let parts = parse_list_partition(&attach_res.stdout);
-        let sys_part = parts
-            .iter()
-            .find(|p| p.kind.eq_ignore_ascii_case("Primary"))
-            .map(|p| p.index)
-            .or_else(|| {
-                parts
-                    .iter()
-                    .find(|p| p.kind.eq_ignore_ascii_case("Basic"))
-                    .map(|p| p.index)
-            })
-            .ok_or_else(|| {
-                AppError::Message("failed to detect system partition from list partition".into())
-            })?;
-
-        let assign_script =
-            assign_partitions_script(Path::new(&node.path), &[(sys_part, sys_letter)]);
-        let assign_path = temp.write_script("assign_repair.txt", &assign_script)?;
-        log_diskpart_script(&assign_path);
-        let assign_res = run_diskpart_script(&assign_path)?;
-        log_command("diskpart assign repair", &assign_res, Some(&assign_path));
-        if assign_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error(
-                "diskpart assign",
-                &assign_res,
-                Some(&assign_path),
-            ));
-        }
-
-        let sys_mount = PathBuf::from(format!("{sys_letter}:"));
-        let bcd_res = run_bcdboot(&sys_mount)?;
-        log_command("bcdboot", &bcd_res, None);
-        if bcd_res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("bcdboot", &bcd_res, None));
-        }
-        let bcd_enum = bcdedit_enum_all()?;
-        log_command("bcdedit enum", &bcd_enum, None);
-        let guid = extract_guid_for_vhd(&bcd_enum.stdout, &node.path)
-            .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter));
-        if let Some(guid) = &guid {
-            db.update_node_bcd(&node.id, guid)?;
-            if let Some(desc) = description {
-                let res = bcdedit_set_description(guid, desc)?;
-                log_command("bcdedit set description", &res, None);
+        if !was_attached {
+            let attach_script = attach_list_vdisk_script(Path::new(&node.path));
+            let attach_path = temp.write_script("attach_repair.txt", &attach_script)?;
+            log_diskpart_script(&attach_path);
+            let attach_res = run_diskpart_script(&attach_path)?;
+            log_command("diskpart attach repair", &attach_res, Some(&attach_path));
+            if attach_res.exit_code.unwrap_or(-1) != 0 {
+                self.rescan_after_failure("repair_bcd");
+                return Err(command_error(
+                    "diskpart attach",
+                    &attach_res,
+                    Some(&attach_path),
+                ));
             }
         }
 
-        let detach_script = detach_vdisk_script(Path::new(&node.path), &[sys_letter]);
-        let detach_path = temp.write_script("detach_repair.txt", &detach_script)?;
-        log_diskpart_script(&detach_path);
-        if let Ok(o) = run_diskpart_script(&detach_path) {
-            log_command("diskpart detach repair", &o, Some(&detach_path));
-        }
+        let guid = match (|| -> Result<Option<String>> {
+            let _attach_guard = AttachedVhdGuard::new(
+                temp.clone(),
+                PathBuf::from(&node.path),
+                vec![sys_letter],
+                "detach_repair.txt",
+                "diskpart detach repair",
+                true,
+                !was_attached,
+            );
+            let layout = inspect_vhd_layout(Path::new(&node.path))?;
+            let sys_part = find_system_partition_number(&layout).ok_or_else(|| {
+                AppError::Message("failed to detect system partition from storage layout".into())
+            })?;
+
+            let assign_script =
+                assign_partitions_script(Path::new(&node.path), &[(sys_part, sys_letter)]);
+            let assign_path = temp.write_script("assign_repair.txt", &assign_script)?;
+            log_diskpart_script(&assign_path);
+            let assign_res = run_diskpart_script(&assign_path)?;
+            log_command("diskpart assign repair", &assign_res, Some(&assign_path));
+            if assign_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error(
+                    "diskpart assign",
+                    &assign_res,
+                    Some(&assign_path),
+                ));
+            }
+
+            let sys_mount = PathBuf::from(format!("{sys_letter}:"));
+            let bcd_res = run_bcdboot(&sys_mount)?;
+            log_command("bcdboot", &bcd_res, None);
+            if bcd_res.exit_code.unwrap_or(-1) != 0 {
+                return Err(command_error("bcdboot", &bcd_res, None));
+            }
+            let bcd_enum = bcdedit_enum_all()?;
+            log_command("bcdedit enum", &bcd_enum, None);
+            let guid = extract_guid_for_vhd(&bcd_enum.stdout, &node.path)
+                .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter));
+            if let Some(guid) = &guid {
+                db.update_node_bcd(&node.id, guid)?;
+                if let Some(desc) = description {
+                    let res = bcdedit_set_description(guid, desc)?;
+                    log_command("bcdedit set description", &res, None);
+                }
+            }
+            guid
+        })() {
+            Ok(guid) => guid,
+            Err(err) => {
+                self.rescan_after_failure("repair_bcd");
+                return Err(err);
+            }
+        };
 
         db.insert_op(
             &Uuid::new_v4().to_string(),
@@ -725,18 +768,26 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         Ok(guid)
     }
 
-    pub fn detail_vdisk(&self, vhd_path: &str) -> Result<crate::diskpart::VhdDetail> {
-        let paths = self.paths()?;
-        let temp = TempManager::new(paths.tmp_dir())?;
-        let script = detail_vdisk_script(Path::new(vhd_path));
-        let script_path = temp.write_script("detail_vdisk.txt", &script)?;
-        log_diskpart_script(&script_path);
-        let res = run_diskpart_script(&script_path)?;
-        log_command("diskpart detail", &res, Some(&script_path));
-        if res.exit_code.unwrap_or(-1) != 0 {
-            return Err(command_error("diskpart detail", &res, Some(&script_path)));
+    fn ensure_no_attached_descendants(&self, node_id: &str) -> Result<()> {
+        let nodes = self.db()?.fetch_nodes()?;
+        let attached = attached_descendants(&nodes, node_id);
+        if attached.is_empty() {
+            return Ok(());
         }
-        Ok(parse_detail_vdisk_parent(&res.stdout))
+        let labels: Vec<String> = attached
+            .into_iter()
+            .map(|node| format!("{} ({})", node.name, node.path))
+            .collect();
+        Err(AppError::Message(format!(
+            "attached descendants must be detached first: {}",
+            labels.join(", ")
+        )))
+    }
+
+    fn rescan_after_failure(&self, context: &str) {
+        if let Err(err) = self.scan() {
+            info!("best-effort scan after {context} failed: {err}");
+        }
     }
 }
 
@@ -748,6 +799,34 @@ struct ScannedVhd {
     detail_ok: bool,
     created_at: DateTime<Utc>,
     bcd_guid: Option<String>,
+    attached: bool,
+}
+
+fn attached_descendants(nodes: &[Node], root_id: &str) -> Vec<Node> {
+    let mut by_parent: HashMap<String, Vec<Node>> = HashMap::new();
+    for node in nodes {
+        if let Some(parent_id) = &node.parent_id {
+            by_parent
+                .entry(parent_id.clone())
+                .or_default()
+                .push(node.clone());
+        }
+    }
+
+    let mut found = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(root_id.to_string());
+    while let Some(current) = queue.pop_front() {
+        if let Some(children) = by_parent.get(&current) {
+            for child in children {
+                queue.push_back(child.id.clone());
+                if is_vhd_attached(Path::new(&child.path)).unwrap_or(false) {
+                    found.push(child.clone());
+                }
+            }
+        }
+    }
+    found
 }
 
 fn collect_vhdx_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -939,6 +1018,116 @@ fn command_error(name: &str, output: &CommandOutput, script: Option<&Path>) -> A
     AppError::Message(format!("{name} failed: {}", parts.join(" | ")))
 }
 
+struct AttachedVhdGuard {
+    temp: TempManager,
+    vhd_path: PathBuf,
+    letters: Vec<char>,
+    script_name: &'static str,
+    log_name: &'static str,
+    cleanup_on_drop: bool,
+    detach_vdisk: bool,
+}
+
+impl AttachedVhdGuard {
+    fn new(
+        temp: TempManager,
+        vhd_path: PathBuf,
+        letters: Vec<char>,
+        script_name: &'static str,
+        log_name: &'static str,
+        cleanup_on_drop: bool,
+        detach_vdisk: bool,
+    ) -> Self {
+        Self {
+            temp,
+            vhd_path,
+            letters,
+            script_name,
+            log_name,
+            cleanup_on_drop,
+            detach_vdisk,
+        }
+    }
+}
+
+impl Drop for AttachedVhdGuard {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop {
+            return;
+        }
+        let cleanup_script =
+            detach_vdisk_script(&self.vhd_path, &self.letters, self.detach_vdisk);
+        let detach_path = match self.temp.write_script(self.script_name, &cleanup_script) {
+            Ok(path) => path,
+            Err(err) => {
+                info!("{}: failed to write cleanup script: {err}", self.log_name);
+                return;
+            }
+        };
+        log_diskpart_script(&detach_path);
+        match run_diskpart_script(&detach_path) {
+            Ok(output) => log_command(self.log_name, &output, Some(&detach_path)),
+            Err(err) => info!("{}: cleanup failed: {err}", self.log_name),
+        }
+    }
+}
+
 fn ps_escape_single(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+fn reconcile_scanned_paths(
+    root: &Path,
+    db: &std::sync::Arc<Database>,
+    existing_paths: &mut HashMap<String, Node>,
+    vhd_paths: &[PathBuf],
+) -> Result<()> {
+    for path in vhd_paths {
+        let path_str = path.to_string_lossy().to_string();
+        let normalized = normalize_path(&path_str);
+        if existing_paths.contains_key(&normalized) {
+            continue;
+        }
+        let Some(candidate) = find_path_relink_candidate(root, existing_paths, path) else {
+            continue;
+        };
+        info!(
+            "relink node path id={} old={} new={}",
+            candidate.id, candidate.path, path_str
+        );
+        db.update_node_path(&candidate.id, &path_str)?;
+        let old_key = normalize_path(&candidate.path);
+        if let Some(mut node) = existing_paths.remove(&old_key) {
+            node.path = path_str.clone();
+            existing_paths.insert(normalized, node);
+        }
+    }
+    Ok(())
+}
+
+fn find_path_relink_candidate(
+    root: &Path,
+    existing_paths: &HashMap<String, Node>,
+    scanned_path: &Path,
+) -> Option<Node> {
+    let scanned_name = scanned_path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let mut matches = existing_paths
+        .values()
+        .filter(|node| {
+            let node_path = Path::new(&node.path);
+            (!node_path.exists() || !path_within_root(root, node_path))
+                && node_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&scanned_name))
+                    .unwrap_or(false)
+        })
+        .cloned();
+    let candidate = matches.next()?;
+    matches.next().is_none().then_some(candidate)
+}
+
+fn path_within_root(root: &Path, candidate: &Path) -> bool {
+    let root = normalize_path(root.to_string_lossy().as_ref());
+    let candidate = normalize_path(candidate.to_string_lossy().as_ref());
+    candidate == root || candidate.starts_with(&(root + "\\"))
 }
