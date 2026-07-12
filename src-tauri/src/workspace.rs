@@ -772,6 +772,86 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
         Ok(guid)
     }
 
+    pub fn attach_vhd(&self, node_id: &str) -> Result<Node> {
+        self.scan()?;
+        let db = self.db()?;
+        let node = db
+            .fetch_node(node_id)?
+            .ok_or_else(|| AppError::Message("node not found".into()))?;
+        if is_vhd_attached(Path::new(&node.path)).unwrap_or(false) {
+            return db
+                .fetch_node(node_id)?
+                .ok_or_else(|| AppError::Message("node not found".into()));
+        }
+        self.ensure_no_attached_descendants(node_id)?;
+        let paths = self.paths()?;
+        let temp = TempManager::new(paths.tmp_dir())?;
+        let attach_script = attach_list_vdisk_script(Path::new(&node.path));
+        let attach_path = temp.write_script("attach_vhd.txt", &attach_script)?;
+        log_diskpart_script(&attach_path);
+        let attach_res = run_diskpart_script(&attach_path)?;
+        log_command("diskpart attach vhd", &attach_res, Some(&attach_path));
+        if attach_res.exit_code.unwrap_or(-1) != 0 {
+            self.rescan_after_failure("attach_vhd");
+            return Err(command_error(
+                "diskpart attach",
+                &attach_res,
+                Some(&attach_path),
+            ));
+        }
+        db.insert_op(
+            &Uuid::new_v4().to_string(),
+            Some(node_id),
+            "attach_vhd",
+            "ok",
+            "",
+        )?;
+        info!("attach_vhd id={node_id}");
+        self.scan()?;
+        db.fetch_node(node_id)?
+            .ok_or_else(|| AppError::Message("node not found after attach".into()))
+    }
+
+    pub fn detach_vhd(&self, node_id: &str) -> Result<Node> {
+        self.scan()?;
+        let db = self.db()?;
+        let node = db
+            .fetch_node(node_id)?
+            .ok_or_else(|| AppError::Message("node not found".into()))?;
+        self.ensure_no_attached_descendants(node_id)?;
+        if !is_vhd_attached(Path::new(&node.path)).unwrap_or(false) {
+            return db
+                .fetch_node(node_id)?
+                .ok_or_else(|| AppError::Message("node not found".into()));
+        }
+        let paths = self.paths()?;
+        let temp = TempManager::new(paths.tmp_dir())?;
+        let detach_script = detach_vdisk_script(Path::new(&node.path), &[], true);
+        let detach_path = temp.write_script("detach_vhd.txt", &detach_script)?;
+        log_diskpart_script(&detach_path);
+        let detach_res = run_diskpart_script(&detach_path)?;
+        log_command("diskpart detach vhd", &detach_res, Some(&detach_path));
+        if detach_res.exit_code.unwrap_or(-1) != 0 {
+            self.rescan_after_failure("detach_vhd");
+            return Err(command_error(
+                "diskpart detach",
+                &detach_res,
+                Some(&detach_path),
+            ));
+        }
+        db.insert_op(
+            &Uuid::new_v4().to_string(),
+            Some(node_id),
+            "detach_vhd",
+            "ok",
+            "",
+        )?;
+        info!("detach_vhd id={node_id}");
+        self.scan()?;
+        db.fetch_node(node_id)?
+            .ok_or_else(|| AppError::Message("node not found after detach".into()))
+    }
+
     fn ensure_no_attached_descendants(&self, node_id: &str) -> Result<()> {
         let nodes = self.db()?.fetch_nodes()?;
         let attached = attached_descendants(&nodes, node_id);

@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 import { NodeDetail } from "./components/NodeDetail";
 import { NodeTree } from "./components/NodeTree";
 import { WorkspaceGate } from "./components/WorkspaceGate";
-import { Node, RecentWorkspace, Settings, StatusLabels, TreeNode, WimImageInfo } from "./types";
+import { WorkspaceLogPanel } from "./components/WorkspaceLogPanel";
+import { Node, RecentWorkspace, Settings, StatusLabels, TreeNode, WimImageInfo, WorkspaceLogEntry } from "./types";
 import { Badge } from "./components/ui/Badge";
 import { Button } from "./components/ui/Button";
 import { Card } from "./components/ui/Card";
@@ -29,8 +30,138 @@ function App() {
   const [diffDesc, setDiffDesc] = useState("");
   const [bcdName, setBcdName] = useState("");
   const [selectedNode, setSelectedNode] = useState("");
+  const [logs, setLogs] = useState<WorkspaceLogEntry[]>([]);
+  const [logFilter, setLogFilter] = useState<"all" | "error" | "op">("all");
+  const previewMode = import.meta.env.VITE_UI_PREVIEW === "1";
 
-  const { run: runCommand, isBusy } = useCommandRunner({ setStatus, setMessage, t });
+  const appendLog = useCallback(
+    (entry: Omit<WorkspaceLogEntry, "id" | "ts"> & { id?: string; ts?: string }) => {
+      setLogs((prev) => [
+        {
+          id: entry.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          ts: entry.ts || new Date().toISOString(),
+          level: entry.level,
+          source: entry.source,
+          title: entry.title,
+          detail: entry.detail,
+          nodeId: entry.nodeId,
+          command: entry.command,
+        },
+        ...prev,
+      ].slice(0, 300));
+    },
+    [],
+  );
+
+  const { run: runCommandRaw, isBusy } = useCommandRunner({ setStatus, setMessage, t });
+
+  const runCommand = useCallback(
+    async <T,>(cmd: string, args?: Record<string, unknown>) => {
+      const nodeId =
+        typeof args?.nodeId === "string"
+          ? args.nodeId
+          : typeof args?.parentId === "string"
+            ? args.parentId
+            : undefined;
+
+      appendLog({
+        level: "info",
+        source: "runtime",
+        title: t("log-level.info"),
+        detail: cmd,
+        command: cmd,
+        nodeId,
+      });
+
+      try {
+        let result: T;
+        if (previewMode) {
+          // Local UI preview without Tauri backend.
+          if (cmd === "list_nodes" || cmd === "scan_workspace") {
+            result = nodes as T;
+          } else if (cmd === "attach_vhd" || cmd === "detach_vhd") {
+            const id = String(args?.nodeId || "");
+            let updated: Node | null = null;
+            setNodes((prev) =>
+              prev.map((n) => {
+                if (n.id !== id) return n;
+                updated = {
+                  ...n,
+                  status: cmd === "attach_vhd" ? "mounted" : n.bcd_guid ? "normal" : "missing_bcd",
+                };
+                return updated!;
+              }),
+            );
+            result = (updated || ({ id } as Node)) as T;
+          } else if (cmd === "add_bcd_entry") {
+            const id = String(args?.nodeId || "");
+            let updated: Node | null = null;
+            setNodes((prev) =>
+              prev.map((n) => {
+                if (n.id !== id) return n;
+                updated = {
+                  ...n,
+                  bcd_guid: n.bcd_guid || `{preview-${n.id}}`,
+                  boot_files_ready: true,
+                  status: n.status === "mounted" ? "mounted" : "normal",
+                };
+                return updated!;
+              }),
+            );
+            result = { guid: updated?.bcd_guid || "{preview}" } as T;
+          } else if (cmd === "delete_bcd") {
+            const id = String(args?.nodeId || "");
+            setNodes((prev) =>
+              prev.map((n) =>
+                n.id === id
+                  ? {
+                      ...n,
+                      bcd_guid: null,
+                      boot_files_ready: false,
+                      status: n.status === "mounted" ? "mounted" : "missing_bcd",
+                    }
+                  : n,
+              ),
+            );
+            result = undefined as T;
+          } else if (cmd === "list_recent_workspaces") {
+            result = [] as T;
+          } else if (cmd === "get_settings") {
+            result = {
+              root_path: rootPath || "E:\\test-vhdx",
+              locale: i18n.language,
+              seq_counter: 3,
+            } as T;
+          } else {
+            result = undefined as T;
+          }
+        } else {
+          result = await runCommandRaw<T>(cmd, args);
+        }
+
+        appendLog({
+          level: "success",
+          source: "op",
+          title: cmd,
+          detail: previewMode ? "preview mock ok" : t("message-checked"),
+          command: cmd,
+          nodeId,
+        });
+        return result;
+      } catch (err) {
+        appendLog({
+          level: "error",
+          source: "error",
+          title: cmd,
+          detail: String(err),
+          command: cmd,
+          nodeId,
+        });
+        throw err;
+      }
+    },
+    [appendLog, runCommandRaw, t, previewMode, nodes, rootPath, i18n.language],
+  );
 
   const statusLabels = useMemo<StatusLabels>(
     () => ({
@@ -80,6 +211,47 @@ function App() {
   }, [runCommand]);
 
   useEffect(() => {
+    if (previewMode) {
+      const now = new Date().toISOString();
+      setAdmin(true);
+      setRootPath("E:\\test-vhdx");
+      setStatus("initialized");
+      setWorkspaceReady(true);
+      setMessage(t("preview-banner"));
+      setNodes([
+        {
+          id: "base-1",
+          parent_id: null,
+          name: "base",
+          path: "E:\\test-vhdx\\disks\\0002-base.vhdx",
+          bcd_guid: "{11111111-1111-1111-1111-111111111111}",
+          desc: "preview base",
+          created_at: now,
+          status: "normal",
+          boot_files_ready: true,
+        },
+        {
+          id: "child-1",
+          parent_id: "base-1",
+          name: "child",
+          path: "E:\\test-vhdx\\disks\\0003-base-child.vhdx",
+          bcd_guid: null,
+          desc: "preview child",
+          created_at: now,
+          status: "mounted",
+          boot_files_ready: false,
+        },
+      ]);
+      setSelectedNode("base-1");
+      appendLog({
+        level: "info",
+        source: "ui",
+        title: t("preview-banner"),
+        detail: "VITE_UI_PREVIEW=1",
+      });
+      return;
+    }
+
     const bootstrap = async () => {
       try {
         const isAdmin = await invoke<boolean>("check_admin");
@@ -128,9 +300,9 @@ function App() {
   }, [workspaceReady, nodes, selectedNode]);
 
   useEffect(() => {
-    if (!workspaceReady) return;
+    if (!workspaceReady || previewMode) return;
     refreshNodes();
-  }, [workspaceReady, refreshNodes]);
+  }, [workspaceReady, refreshNodes, previewMode]);
 
   const treeData = useMemo<TreeNode[]>(() => {
     const map = new Map<string, TreeNode>();
@@ -269,6 +441,50 @@ function App() {
       await refreshRecents();
     }
   }, [rootPath, runCommand, i18n.language, baseName, baseDesc, wimPath, wimIndex, baseSize, t, syncNodes, refreshRecents, validateRootPath]);
+
+
+  const handleToggleMount = useCallback(
+    async (node: Node) => {
+      try {
+        if (node.status === "mounted") {
+          await runCommand<Node>("detach_vhd", { nodeId: node.id });
+          setMessage(t("message-detached", { name: node.name }));
+        } else {
+          await runCommand<Node>("attach_vhd", { nodeId: node.id });
+          setMessage(t("message-attached", { name: node.name }));
+        }
+        if (!previewMode) {
+          await syncNodes();
+        }
+      } catch {
+        // handled
+      }
+    },
+    [runCommand, syncNodes, t, previewMode],
+  );
+
+  const handleToggleBoot = useCallback(
+    async (node: Node) => {
+      try {
+        if (node.bcd_guid || node.boot_files_ready) {
+          await runCommand("delete_bcd", { nodeId: node.id });
+          setMessage(t("message-deleted-bcd"));
+        } else {
+          await runCommand("add_bcd_entry", {
+            nodeId: node.id,
+            description: node.name,
+          });
+          setMessage(t("message-repaired-bcd", { guid: node.name }));
+        }
+        if (!previewMode) {
+          await syncNodes();
+        }
+      } catch {
+        // handled
+      }
+    },
+    [runCommand, syncNodes, t, previewMode],
+  );
 
   const handleCreateDiff = useCallback(async () => {
     if (!selectedNode) return;
@@ -472,6 +688,11 @@ function App() {
           <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
             <Card className="flex flex-wrap items-center justify-between gap-3 p-4 shadow-md shadow-peach-300/25">
               <div className="flex flex-wrap items-center gap-3">
+                {previewMode ? (
+                  <Badge tone="info" className="max-w-xl px-3 py-1">
+                    {t("preview-banner")}
+                  </Badge>
+                ) : null}
                 <Badge tone={admin ? "positive" : "warn"} className="px-3 py-1">
                   {adminLabel}
                 </Badge>
@@ -511,14 +732,27 @@ function App() {
               </div>
             </Card>
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-[340px_minmax(0,1fr)]">
-              <NodeTree
-                data={treeData}
-                selectedId={selectedNode}
-                onSelect={(id) => setSelectedNode(id)}
-                statusLabels={statusLabels}
-                t={t}
-              />
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-[360px_minmax(0,1fr)]">
+              <div className="grid min-h-0 grid-rows-[minmax(0,1.2fr)_minmax(0,0.9fr)] gap-4 overflow-hidden">
+                <NodeTree
+                  data={treeData}
+                  selectedId={selectedNode}
+                  onSelect={(id) => setSelectedNode(id)}
+                  statusLabels={statusLabels}
+                  isBusy={isBusy}
+                  onToggleMount={handleToggleMount}
+                  onToggleBoot={handleToggleBoot}
+                  t={t}
+                />
+                <WorkspaceLogPanel
+                  logs={logs}
+                  filter={logFilter}
+                  onFilterChange={setLogFilter}
+                  onClear={() => setLogs([])}
+                  onFocusNode={(id) => setSelectedNode(id)}
+                  t={t}
+                />
+              </div>
               <NodeDetail
                 selected={selectedDetail}
                 parentNode={parentNode}

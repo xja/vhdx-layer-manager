@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "release:patch": "bun scripts/release.ts patch",
     "release:minor": "bun scripts/release.ts minor",
-    "release:major": "bun scripts/release.ts major"
+    "release:major": "bun scripts/release.ts major",
+    "dev:ui": "vite --mode ui-preview",
+    "preview:ui": "vite --mode ui-preview"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.17",

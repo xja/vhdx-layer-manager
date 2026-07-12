@@ -226,6 +226,32 @@ pub async fn delete_subtree(node_id: String, state: State<'_, SharedState>) -> C
 }
 
 #[tauri::command]
+pub async fn attach_vhd(
+    node_id: String,
+    state: State<'_, SharedState>,
+) -> CmdResult<Node> {
+    let state = state.inner().clone();
+    run_blocking_cmd(move || {
+        let svc = WorkspaceService::new(state);
+        svc.attach_vhd(&node_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn detach_vhd(
+    node_id: String,
+    state: State<'_, SharedState>,
+) -> CmdResult<Node> {
+    let state = state.inner().clone();
+    run_blocking_cmd(move || {
+        let svc = WorkspaceService::new(state);
+        svc.detach_vhd(&node_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn delete_bcd(node_id: String, state: State<'_, SharedState>) -> CmdResult<()> {
     let state = state.inner().clone();
     run_blocking_cmd(move || {

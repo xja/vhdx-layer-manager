@@ -93,5 +93,27 @@
   "repair-bcd-button": "修复 BCD",
   "delete-bcd-button": "删除 BCD 引导项",
   "delete-subtree-button": "删除子树",
-  "detail-empty": "请选择左侧节点"
+  "detail-empty": "请选择左侧节点",
+  "node-tree-tip": "点击节点查看详情；挂载与引导可在树节点直接切换。",
+  "mount-toggle-on": "挂载",
+  "mount-toggle-off": "卸载",
+  "boot-toggle-on": "写入引导",
+  "boot-toggle-off": "删除引导",
+  "log-panel-title": "操作 / 运行日志",
+  "log-panel-tip": "操作摘要、运行步骤与错误会汇总到这里。",
+  "log-filter-all": "全部",
+  "log-filter-op": "操作",
+  "log-filter-error": "错误",
+  "log-clear": "清空",
+  "log-empty": "暂无日志",
+  "log-focus-node": "定位",
+  "log-level": {
+    "info": "信息",
+    "success": "成功",
+    "warn": "警告",
+    "error": "错误"
+  },
+  "message-attached": "已挂载：{{name}}",
+  "message-detached": "已卸载：{{name}}",
+  "preview-banner": "前端预览模式：界面可本地查看，后端命令使用 mock 数据。"
 }

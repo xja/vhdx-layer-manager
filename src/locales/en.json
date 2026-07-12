@@ -93,5 +93,27 @@
   "repair-bcd-button": "Repair BCD",
   "delete-bcd-button": "Delete BCD entry",
   "delete-subtree-button": "Delete subtree",
-  "detail-empty": "Select a node on the left"
+  "detail-empty": "Select a node on the left",
+  "node-tree-tip": "Select a node for details; mount and boot can be toggled on the tree item.",
+  "mount-toggle-on": "Mount",
+  "mount-toggle-off": "Unmount",
+  "boot-toggle-on": "Write boot",
+  "boot-toggle-off": "Delete boot",
+  "log-panel-title": "Ops / runtime logs",
+  "log-panel-tip": "Operation summaries, runtime steps, and errors land here.",
+  "log-filter-all": "All",
+  "log-filter-op": "Ops",
+  "log-filter-error": "Errors",
+  "log-clear": "Clear",
+  "log-empty": "No logs yet",
+  "log-focus-node": "Focus",
+  "log-level": {
+    "info": "Info",
+    "success": "Success",
+    "warn": "Warn",
+    "error": "Error"
+  },
+  "message-attached": "Mounted: {{name}}",
+  "message-detached": "Unmounted: {{name}}",
+  "preview-banner": "Frontend preview mode: UI is local-only with mock backend data."
 }

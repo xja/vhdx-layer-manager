@@ -39,6 +39,8 @@ pub fn run() {
             commands::set_bootsequence_and_reboot,
             commands::start_vm,
             commands::delete_subtree,
+            commands::attach_vhd,
+            commands::detach_vhd,
             commands::delete_bcd,
             commands::repair_bcd,
             commands::add_bcd_entry,

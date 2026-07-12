@@ -45,3 +45,17 @@ export type RecentWorkspace = {
   node_count?: number;
   locale?: string;
 };
+
+export type WorkspaceLogLevel = "info" | "success" | "warn" | "error";
+export type WorkspaceLogSource = "ui" | "op" | "runtime" | "error";
+
+export type WorkspaceLogEntry = {
+  id: string;
+  ts: string;
+  level: WorkspaceLogLevel;
+  source: WorkspaceLogSource;
+  title: string;
+  detail?: string;
+  nodeId?: string;
+  command?: string;
+};
