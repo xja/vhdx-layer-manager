@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { NodeDetail } from "./components/NodeDetail";
 import { NodeTree } from "./components/NodeTree";
@@ -10,6 +10,8 @@ import { Badge } from "./components/ui/Badge";
 import { Button } from "./components/ui/Button";
 import { Card } from "./components/ui/Card";
 import { useCommandRunner } from "./hooks/useCommandRunner";
+
+const QUIET_LOG_COMMANDS = new Set(["list_nodes", "list_recent_workspaces", "get_settings"]);
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -33,6 +35,9 @@ function App() {
   const [logs, setLogs] = useState<WorkspaceLogEntry[]>([]);
   const [logFilter, setLogFilter] = useState<"all" | "error" | "op">("all");
   const previewMode = import.meta.env.VITE_UI_PREVIEW === "1";
+  const nodesRef = useRef<Node[]>([]);
+  const rootPathRef = useRef("");
+  const localeRef = useRef(i18n.language);
 
   const appendLog = useCallback(
     (entry: Omit<WorkspaceLogEntry, "id" | "ts"> & { id?: string; ts?: string }) => {
@@ -55,6 +60,18 @@ function App() {
 
   const { run: runCommandRaw, isBusy } = useCommandRunner({ setStatus, setMessage, t });
 
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
+    rootPathRef.current = rootPath;
+  }, [rootPath]);
+
+  useEffect(() => {
+    localeRef.current = i18n.language;
+  }, [i18n.language]);
+
   const runCommand = useCallback(
     async <T,>(cmd: string, args?: Record<string, unknown>) => {
       const nodeId =
@@ -63,22 +80,25 @@ function App() {
           : typeof args?.parentId === "string"
             ? args.parentId
             : undefined;
+      const shouldLog = !QUIET_LOG_COMMANDS.has(cmd);
 
-      appendLog({
-        level: "info",
-        source: "runtime",
-        title: t("log-level.info"),
-        detail: cmd,
-        command: cmd,
-        nodeId,
-      });
+      if (shouldLog) {
+        appendLog({
+          level: "info",
+          source: "runtime",
+          title: t("log-level.info"),
+          detail: cmd,
+          command: cmd,
+          nodeId,
+        });
+      }
 
       try {
         let result: T;
         if (previewMode) {
           // Local UI preview without Tauri backend.
           if (cmd === "list_nodes" || cmd === "scan_workspace") {
-            result = nodes as T;
+            result = nodesRef.current as T;
           } else if (cmd === "attach_vhd" || cmd === "detach_vhd") {
             const id = String(args?.nodeId || "");
             setNodes((prev) =>
@@ -124,8 +144,8 @@ function App() {
             result = [] as T;
           } else if (cmd === "get_settings") {
             result = {
-              root_path: rootPath || "E:\\test-vhdx",
-              locale: i18n.language,
+              root_path: rootPathRef.current || "E:\\test-vhdx",
+              locale: localeRef.current,
               seq_counter: 3,
             } as T;
           } else {
@@ -135,14 +155,16 @@ function App() {
           result = await runCommandRaw<T>(cmd, args);
         }
 
-        appendLog({
-          level: "success",
-          source: "op",
-          title: cmd,
-          detail: previewMode ? "preview mock ok" : t("message-checked"),
-          command: cmd,
-          nodeId,
-        });
+        if (shouldLog) {
+          appendLog({
+            level: "success",
+            source: "op",
+            title: cmd,
+            detail: previewMode ? "preview mock ok" : undefined,
+            command: cmd,
+            nodeId,
+          });
+        }
         return result;
       } catch (err) {
         appendLog({
@@ -156,7 +178,7 @@ function App() {
         throw err;
       }
     },
-    [appendLog, runCommandRaw, t, previewMode, nodes, rootPath, i18n.language],
+    [appendLog, runCommandRaw, t, previewMode],
   );
 
   const statusLabels = useMemo<StatusLabels>(
