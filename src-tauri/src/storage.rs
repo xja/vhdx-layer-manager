@@ -23,6 +23,7 @@ pub struct VhdPartition {
     #[serde(rename = "Type")]
     pub kind: String,
     pub gpt_type: Option<String>,
+    #[serde(rename = "SizeMB", alias = "SizeMb")]
     pub size_mb: u64,
     pub drive_letter: Option<String>,
     pub file_system: Option<String>,
