@@ -82,7 +82,7 @@ impl Database {
         let root_str = root
             .to_str()
             .ok_or_else(|| AppError::Message("Invalid root path".into()))?;
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE settings SET root_path = COALESCE(NULLIF(root_path, ''), ?1) WHERE id = 1",
             params![root_str],
@@ -95,7 +95,7 @@ impl Database {
         let root_str = root
             .to_str()
             .ok_or_else(|| AppError::Message("Invalid root path".into()))?;
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE settings SET root_path = ?1 WHERE id = 1",
             params![root_str],
@@ -104,7 +104,7 @@ impl Database {
     }
 
     pub fn update_locale(&self, locale: &str) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE settings SET locale = ?1 WHERE id = 1",
             params![locale],
@@ -113,7 +113,7 @@ impl Database {
     }
 
     pub fn next_seq(&self) -> Result<i64> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute("UPDATE settings SET seq_counter = seq_counter + 1", [])?;
         let seq: i64 = conn.query_row("SELECT seq_counter FROM settings", [], |row| row.get(0))?;
         Ok(seq)
@@ -137,7 +137,7 @@ impl Database {
     }
 
     pub fn insert_node(&self, node: &Node) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "INSERT INTO nodes (id, parent_id, name, path, bcd_guid, desc, created_at, status, boot_files_ready) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -156,7 +156,7 @@ impl Database {
     }
 
     pub fn update_node_status(&self, id: &str, status: NodeStatus) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE nodes SET status = ?1 WHERE id = ?2",
             params![format!("{:?}", status), id],
@@ -165,7 +165,7 @@ impl Database {
     }
 
     pub fn update_node_parent(&self, id: &str, parent_id: Option<&str>) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
             params![parent_id, id],
@@ -174,7 +174,7 @@ impl Database {
     }
 
     pub fn update_node_path(&self, id: &str, path: &str) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE nodes SET path = ?1 WHERE id = ?2",
             params![path, id],
@@ -183,7 +183,7 @@ impl Database {
     }
 
     pub fn update_node_bcd(&self, id: &str, bcd_guid: &str) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE nodes SET bcd_guid = ?1, boot_files_ready = 1 WHERE id = ?2",
             params![bcd_guid, id],
@@ -192,7 +192,7 @@ impl Database {
     }
 
     pub fn clear_node_bcd(&self, id: &str) -> Result<()> {
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "UPDATE nodes SET bcd_guid = NULL, boot_files_ready = 0 WHERE id = ?1",
             params![id],
@@ -292,7 +292,7 @@ impl Database {
         detail: &str,
     ) -> Result<()> {
         let ts: DateTime<Utc> = Utc::now();
-        let mut conn = self.connection();
+        let conn = self.connection();
         conn.execute(
             "INSERT INTO ops (id, node_id, ts, action, result, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, node_id, ts.to_rfc3339(), action, result, detail],

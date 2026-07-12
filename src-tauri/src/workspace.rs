@@ -4,7 +4,6 @@ use std::fs;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use tracing::info;
@@ -299,9 +298,11 @@ impl WorkspaceService {
 
             let bcd_enum = bcdedit_enum_all()?;
             log_command("bcdedit enum", &bcd_enum, None);
-            extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
+            Ok(
+                extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
                 .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            )
         })() {
             Ok(guid) => guid,
             Err(err) => {
@@ -418,9 +419,11 @@ impl WorkspaceService {
             }
             let bcd_enum = bcdedit_enum_all()?;
             log_command("bcdedit enum", &bcd_enum, None);
-            extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
+            Ok(
+                extract_guid_for_vhd(&bcd_enum.stdout, vhd_path.to_str().unwrap_or_default())
                 .or_else(|| extract_guid_for_partition_letter(&bcd_enum.stdout, sys_letter))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            )
         })() {
             Ok(guid) => guid,
             Err(err) => {
@@ -744,7 +747,7 @@ Start-Process vmconnect.exe -ArgumentList 'localhost', $vmName | Out-Null
                     log_command("bcdedit set description", &res, None);
                 }
             }
-            guid
+            Ok(guid)
         })() {
             Ok(guid) => guid,
             Err(err) => {

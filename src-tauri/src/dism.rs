@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::models::WimImageInfo;
-use crate::sys::{run_command, run_elevated_command, CommandOutput};
+use crate::sys::{run_elevated_command, CommandOutput};
 
 /// List images inside a WIM/ESD file via DISM /Get-WimInfo.
 pub fn list_images(image_path: &str) -> Result<Vec<WimImageInfo>> {
